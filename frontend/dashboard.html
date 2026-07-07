@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard — Voice Assistant (Gemini Live)</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container dashboard-page">
+        <header>
+            <h1>Session Dashboard</h1>
+            <div class="status-bar">
+                <span id="ws-status" class="status disconnected">Disconnected</span>
+                <span id="event-count">Events: 0</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="card">
+                <h2>Event Log</h2>
+                <div id="event-log" style="max-height:600px;overflow-y:auto;font-size:0.8rem;line-height:1.6;">
+                    <span style="color:#666">Waiting for events...</span>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <a href="/">Back to Assistant</a>
+            <span class="version">v2.0.0-gemini-live</span>
+        </footer>
+    </div>
+
+    <script src="/static/js/websocket.js"></script>
+    <script>
+        const WS_URL = `ws://${location.host}/ws`;
+
+        const wsStatus = document.getElementById('ws-status');
+        const eventCount = document.getElementById('event-count');
+        const eventLog = document.getElementById('event-log');
+        let count = 0;
+
+        function init() {
+            const ws = new VoiceWebSocket(WS_URL);
+            ws.onOpen = () => {
+                wsStatus.textContent = 'Connected';
+                wsStatus.className = 'status connected';
+                addEvent('system', 'Connected to server');
+            };
+            ws.onClose = () => {
+                wsStatus.textContent = 'Disconnected';
+                wsStatus.className = 'status disconnected';
+                addEvent('system', 'Disconnected');
+            };
+            ws.onMessage = (msg) => {
+                addEvent(msg.type, JSON.stringify(msg, null, 1));
+            };
+            ws.connect();
+        }
+
+        function addEvent(type, content) {
+            count++;
+            eventCount.textContent = `Events: ${count}`;
+            const div = document.createElement('div');
+            div.style.borderBottom = '1px solid #222';
+            div.style.padding = '4px 0';
+            div.innerHTML = `<span style="color:#888">[${new Date().toLocaleTimeString()}]</span> ` +
+                `<span style="color:#64b5f6">${type}</span> ` +
+                `<span style="color:#ccc;white-space:pre-wrap">${content}</span>`;
+            eventLog.insertBefore(div, eventLog.firstChild);
+            if (eventLog.children.length > 200) {
+                eventLog.removeChild(eventLog.lastChild);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant - Gemini Live</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Voice Assistant (Gemini Live)</h1>
+            <div class="status-bar">
+                <span id="connection-status" class="status disconnected">Disconnected</span>
+                <span id="vad-indicator" class="status idle">Idle</span>
+                <span id="turn-indicator" class="status idle">Waiting</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="visualizer">
+                <canvas id="audio-visualizer" width="600" height="100"></canvas>
+            </div>
+
+            <div class="transcript-area">
+                <div class="transcript-label">You said:</div>
+                <div id="user-transcript" class="transcript-text">...</div>
+            </div>
+
+            <div class="transcript-area">
+                <div class="transcript-label">Assistant:</div>
+                <div id="assistant-transcript" class="transcript-text">...</div>
+            </div>
+
+            <div class="controls">
+                <button id="toggle-btn" class="btn btn-primary">Start Listening</button>
+                <button id="barge-in-btn" class="btn btn-secondary" disabled>Interrupt</button>
+            </div>
+
+            <div class="text-input-area">
+                <input type="text" id="text-input" placeholder="Type a message..." disabled>
+                <button id="text-send-btn" class="btn btn-secondary" disabled>Send</button>
+            </div>
+
+            <div class="latency-info">
+                <span id="latency-display">Latency: --</span>
+            </div>
+        </main>
+
+        <footer>
+            <a href="/dashboard" target="_blank">Latency Dashboard</a>
+            <span class="version">v2.0.0-gemini-live</span>
+        </footer>
+    </div>
+
+    <script src="/static/js/vad.js"></script>
+    <script src="/static/js/mic.js"></script>
+    <script src="/static/js/playback.js"></script>
+    <script src="/static/js/websocket.js"></script>
+    <script>
+        const WS_URL = `ws://${location.host}/ws`;
+
+        const statusEl = document.getElementById('connection-status');
+        const vadEl = document.getElementById('vad-indicator');
+        const turnEl = document.getElementById('turn-indicator');
+        const userTranscript = document.getElementById('user-transcript');
+        const assistantTranscript = document.getElementById('assistant-transcript');
+        const toggleBtn = document.getElementById('toggle-btn');
+        const bargeInBtn = document.getElementById('barge-in-btn');
+        const textInput = document.getElementById('text-input');
+        const textSendBtn = document.getElementById('text-send-btn');
+        const latencyDisplay = document.getElementById('latency-display');
+        const canvas = document.getElementById('audio-visualizer');
+        const ctx = canvas.getContext('2d');
+
+        let ws, mic, vad, playback;
+        let listening = false;
+        let speaking = false;
+        let receiving = false;
+        let turnActive = false;
+        let startTime = 0;
+        let assistantBuffer = '';
+
+        function init() {
+            playback = new AudioPlayback({ onDone: () => {} });
+            playback.init();
+
+            vad = new EnergyVAD({
+                threshold: 0.02,
+                silenceTimeoutMs: 600,
+                minSpeechMs: 200,
+                onSpeechStart: () => {
+                    speaking = true;
+                    vadEl.textContent = 'Speaking';
+                    vadEl.className = 'status speaking';
+                    if (!receiving) {
+                        turnEl.textContent = 'Recording';
+                        turnEl.className = 'status recording';
+                    }
+                },
+                onSpeechEnd: () => {
+                    speaking = false;
+                    vadEl.textContent = 'Processing';
+                    vadEl.className = 'status processing';
+                    turnEl.textContent = 'Waiting';
+                    turnEl.className = 'status idle';
+                },
+                onEnergy: (energy) => {
+                    drawVisualizer(energy);
+                }
+            });
+
+            mic = new MicCapture({
+                sampleRate: 16000,
+                onAudio: (pcmData, floatSamples) => {
+                    if (ws && ws.connected && !receiving) {
+                        ws.sendAudio(pcmData);
+                    }
+                    vad.process(floatSamples);
+                }
+            });
+
+            ws = new VoiceWebSocket(WS_URL);
+            ws.onOpen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                textInput.disabled = false;
+                textSendBtn.disabled = false;
+            };
+            ws.onClose = () => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+                textInput.disabled = true;
+                textSendBtn.disabled = true;
+                if (listening) {
+                    mic.stop();
+                    vad.reset();
+                    listening = false;
+                    toggleBtn.textContent = 'Start Listening';
+                }
+                turnActive = false;
+                receiving = false;
+            };
+            ws.onMessage = handleMessage;
+            ws.connect();
+
+            toggleBtn.addEventListener('click', toggleListening);
+            bargeInBtn.addEventListener('click', bargeIn);
+            textSendBtn.addEventListener('click', sendTextMessage);
+            textInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') sendTextMessage();
+            });
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'connected':
+                    statusEl.textContent = 'Session: ' + msg.session_id;
+                    break;
+
+                case 'user_transcript':
+                    userTranscript.textContent = msg.text;
+                    userTranscript.className = 'transcript-text';
+                    break;
+
+                case 'assistant_text':
+                    if (msg.text) {
+                        assistantBuffer += msg.text;
+                        assistantTranscript.textContent = assistantBuffer;
+                    }
+                    break;
+
+                case 'assistant_audio':
+                    if (msg.audio) {
+                        receiving = true;
+                        turnEl.textContent = 'Speaking';
+                        turnEl.className = 'status speaking';
+                        const binary = Uint8Array.from(atob(msg.audio), c => c.charCodeAt(0));
+                        playback.enqueue(binary.buffer);
+                    }
+                    break;
+
+                case 'turn_complete':
+                    receiving = false;
+                    if (assistantBuffer) {
+                        turnEl.textContent = 'Done';
+                        turnEl.className = 'status idle';
+                    }
+                    break;
+
+                case 'turn_interrupted':
+                    playback.bargeIn();
+                    receiving = false;
+                    turnEl.textContent = 'Interrupted';
+                    turnEl.className = 'status idle';
+                    break;
+
+                case 'vad_start':
+                    turnEl.textContent = 'Recording';
+                    turnEl.className = 'status recording';
+                    break;
+
+                case 'vad_end':
+                    turnEl.textContent = 'Processing';
+                    turnEl.className = 'status processing';
+                    break;
+
+                case 'error':
+                    assistantTranscript.textContent = 'Error: ' + msg.text;
+                    turnEl.textContent = 'Error';
+                    turnEl.className = 'status error';
+                    receiving = false;
+                    break;
+            }
+        }
+
+        async function toggleListening() {
+            if (listening) {
+                mic.stop();
+                vad.reset();
+                listening = false;
+                toggleBtn.textContent = 'Start Listening';
+                vadEl.textContent = 'Idle';
+                vadEl.className = 'status idle';
+                turnEl.textContent = 'Stopped';
+                turnEl.className = 'status idle';
+                bargeInBtn.disabled = true;
+                receiving = false;
+                return;
+            }
+
+            if (!ws || !ws.connected) {
+                statusEl.textContent = 'Waiting for server...';
+                statusEl.className = 'status processing';
+                return;
+            }
+
+            vad.reset();
+            assistantBuffer = '';
+            userTranscript.textContent = '';
+            assistantTranscript.textContent = '';
+
+            toggleBtn.textContent = 'Starting...';
+            toggleBtn.disabled = true;
+            try {
+                await mic.start();
+                listening = true;
+                toggleBtn.textContent = 'Stop Listening';
+                toggleBtn.disabled = false;
+                vadEl.textContent = 'Ready';
+                vadEl.className = 'status idle';
+                bargeInBtn.disabled = false;
+            } catch (e) {
+                toggleBtn.textContent = 'Start Listening';
+                toggleBtn.disabled = false;
+                statusEl.textContent = 'Mic error: ' + e.message;
+                statusEl.className = 'status error';
+            }
+        }
+
+        function sendTextMessage() {
+            const text = textInput.value.trim();
+            if (!text || !ws || !ws.connected) return;
+            userTranscript.textContent = text;
+            assistantTranscript.textContent = '';
+            assistantBuffer = '';
+            textInput.value = '';
+            turnEl.textContent = 'Thinking';
+            turnEl.className = 'status processing';
+            ws.sendJson({ type: 'text_message', text: text });
+        }
+
+        function bargeIn() {
+            if (playback) playback.bargeIn();
+            receiving = false;
+            assistantBuffer = '';
+            assistantTranscript.textContent = '';
+            turnEl.textContent = 'Ready';
+            turnEl.className = 'status idle';
+            bargeInBtn.disabled = true;
+        }
+
+        function drawVisualizer(energy) {
+            const w = canvas.width, h = canvas.height;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, w, h);
+            const barWidth = 4;
+            const barCount = Math.floor(w / barWidth);
+            for (let i = 0; i < barCount; i++) {
+                const val = (energy * 1000) * Math.max(0, Math.sin(i * 0.1 + Date.now() * 0.005));
+                const barH = Math.min(h, val);
+                ctx.fillStyle = receiving ? '#FF9800' : (speaking ? '#4CAF50' : '#2196F3');
+                ctx.fillRect(i * barWidth, h - barH, barWidth - 1, barH);
+            }
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>
