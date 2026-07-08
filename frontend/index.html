@@ -176,7 +176,7 @@
                         turnEl.textContent = 'Speaking';
                         turnEl.className = 'status speaking';
                         const binary = Uint8Array.from(atob(msg.audio), c => c.charCodeAt(0));
-                        playback.enqueue(binary.buffer);
+                        playback.enqueue(binary.buffer, msg.mime_type);
                     }
                     break;
 

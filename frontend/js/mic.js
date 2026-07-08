@@ -13,7 +13,7 @@ class MicCapture {
         this._stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        this._audioCtx = new AudioCtx();
+        this._audioCtx = new AudioCtx({ sampleRate: this.sampleRate });
         if (this._audioCtx.state === 'suspended') {
             await this._audioCtx.resume();
         }
